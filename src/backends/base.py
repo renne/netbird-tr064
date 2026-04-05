@@ -6,15 +6,16 @@ class RouterBackend(ABC):
 
     Each backend manages static LAN IP routes on a single router.
     Only routes injected by this service (identified by matching gateway IP)
-    are ever modified or deleted — foreign routes are never touched.
+    are ever modified or deleted -- foreign routes are never touched.
     """
 
     @abstractmethod
-    def get_routes(self) -> set[tuple[str, str]]:
+    def get_routes(self) -> set[tuple[str, str, str]]:
         """Return the set of currently configured static routes.
 
         Returns:
-            Set of (dest_ip, subnet_mask) tuples, e.g. {("10.0.0.0", "255.255.255.0")}
+            Set of (dest_ip, subnet_mask, gateway_ip) tuples,
+            e.g. {("10.0.0.0", "255.255.255.0", "10.0.0.29")}
         """
 
     @abstractmethod
