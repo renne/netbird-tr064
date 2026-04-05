@@ -33,6 +33,7 @@ SOAP_TEMPLATE = """\
 </s:Envelope>"""
 
 SERVICE_TYPE = "urn:dslforum-org:service:Layer3Forwarding:1"
+DEVICE_NS = "urn:dslforum-org:device-1-0"
 ROUTE_TYPE = "Host"
 ROUTE_INTERFACE = "LanHostConfigManagement1"
 
@@ -74,9 +75,9 @@ class TR064Backend(RouterBackend):
 
         root = ET.fromstring(resp.text)
 
-        for service in root.iter("service"):
-            stype = service.findtext("serviceType", default="")
-            control_path = service.findtext("controlURL", default="")
+        for service in root.iter(f"{{{DEVICE_NS}}}service"):
+            stype = service.findtext(f"{{{DEVICE_NS}}}serviceType") or ""
+            control_path = service.findtext(f"{{{DEVICE_NS}}}controlURL") or ""
             if "Layer3Forwarding:1" in stype and control_path:
                 self._control_url = f"{self._base_url}{control_path}"
                 log.debug("Found Layer3Forwarding:1 at %s", self._control_url)
