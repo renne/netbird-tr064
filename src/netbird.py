@@ -30,6 +30,8 @@ class NetBirdClient:
 
         Each entry is a canonical CIDR string (e.g., "10.1.0.0/24").
         Only IPv4 routes are returned; IPv6 entries are silently skipped.
+        Routes with masquerade=true are skipped -- the subnet router NATs
+        overlay traffic so the gateway router needs no static route.
         """
         url = f"{self._api_base}/routes"
         resp = self._session.get(url, timeout=15)
@@ -39,6 +41,9 @@ class NetBirdClient:
         cidrs: set[str] = set()
         for route in data:
             if only_enabled and not route.get("enabled", True):
+                continue
+            if route.get("masquerade", False):
+                log.debug("Skipping masquerade=true route: %s", route.get("network", ""))
                 continue
             network = route.get("network", "").strip()
             if not network:
