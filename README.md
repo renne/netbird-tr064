@@ -13,11 +13,14 @@ This service was created as a workaround pending native Fritz!OS support
    `poll_interval` seconds.
 2. Compares the current NetBird route set against the static routes already present
    in each configured router.
-3. Adds missing routes via `AddLANIPRoute` and removes orphaned routes via
+3. Skips routes with `masquerade=true` — the subnet router NATes overlay
+   traffic, so no static route is needed on the gateway router.
+4. Adds missing routes via `AddLANIPRoute` and removes orphaned routes via
    `DeleteLANIPRoute`.
-4. Uses an **ownership rule**: only routes whose gateway address matches the
-   configured (or auto-detected) gateway are ever deleted — foreign routes are
-   never touched.
+5. Uses an **ownership rule**: only routes whose gateway address matches the
+   configured `gateway_ip` are ever deleted — foreign routes are never touched.
+   If a desired destination is already covered by a foreign route, a `WARNING`
+   is logged and the route is skipped.
 
 Because NetBird has no management-plane webhooks
 ([#1596](https://github.com/netbirdio/netbird/issues/1596),
@@ -78,7 +81,7 @@ routers:
     url: "http://192.168.178.1:49000"
     username: "admin"
     password: "secret"
-    gateway_ip: ""       # leave blank to auto-detect from router default route
+    gateway_ip: "192.168.178.x"  # LAN IP of the NetBird routing peer (required)
 ```
 
 ### Fields
@@ -94,7 +97,7 @@ routers:
 | `routers[].url` | Yes | — | TR-064 base URL (e.g. `http://192.168.178.1:49000`) |
 | `routers[].username` | Yes | — | Router admin username |
 | `routers[].password` | Yes | — | Router admin password |
-| `routers[].gateway_ip` | No | (auto) | Gateway IP for new routes; auto-detected if blank |
+| `routers[].gateway_ip` | Yes | — | LAN IP of the NetBird routing peer; used as next-hop and to identify owned routes |
 
 ### Environment variables
 
@@ -130,7 +133,7 @@ Implement four methods and register the backend in `src/backends/__init__.py`:
 
 ```python
 class RouterBackend(ABC):
-    def get_routes(self) -> set[tuple[str, str]]: ...      # {(dest_ip, mask), …}
+    def get_routes(self) -> set[tuple[str, str, str]]: ...  # {(dest_ip, mask, gateway_ip), …}
     def add_route(self, dest: str, mask: str, gateway: str) -> None: ...
     def delete_route(self, dest: str, mask: str) -> None: ...
     def get_default_gateway(self) -> str: ...
