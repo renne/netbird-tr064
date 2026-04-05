@@ -3,7 +3,7 @@ netbird:
   # Cloud:       https://api.netbird.io
   management_url: "http://netbird-management:80"
 
-  # Personal access token — create in the NetBird dashboard under Settings → API
+  # Personal access token -- create in the NetBird dashboard under Settings -> API
   api_token: "nbp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 sync:
@@ -17,21 +17,23 @@ routers:
   - name: "fritzbox"
     backend: tr064
 
-    # TR-064 base URL — Fritz!Box default is port 49000 (unencrypted) or 49443 (TLS)
+    # TR-064 base URL -- Fritz!Box default is port 49000 (unencrypted) or 49443 (TLS)
     url: "http://192.168.178.1:49000"
 
     # Fritz!Box admin credentials (the same ones used for the web interface)
     username: "admin"
     password: "changeme"
 
-    # IP address to use as the next-hop gateway when adding routes.
-    # Leave blank ("") to auto-detect from the Fritz!Box WANIPConnection service.
-    gateway_ip: ""
+    # LAN IP of the NetBird routing peer -- the device that routes overlay traffic
+    # into this LAN (e.g. the peer running the netbird client as a subnet router).
+    # Required -- this value is used as the next-hop when adding routes and to
+    # identify which existing routes are owned by this service.
+    gateway_ip: "192.168.178.x"
 
-  # Add more routers below — any TR-064 compliant device works
+  # Add more routers below -- any TR-064 compliant device works
   # - name: "fritzbox-second-site"
   #   backend: tr064
   #   url: "http://10.0.0.1:49000"
   #   username: "admin"
   #   password: "changeme"
-  #   gateway_ip: ""
+  #   gateway_ip: "10.0.0.x"
