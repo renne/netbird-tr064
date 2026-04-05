@@ -138,39 +138,23 @@ class TR064Backend(RouterBackend):
     # RouterBackend interface                                              #
     # ------------------------------------------------------------------ #
 
-    def get_routes(self) -> set[tuple[str, str]]:
+    def get_routes(self) -> set[tuple[str, str, str]]:
         body = self._soap("GetForwardNumberOfEntries")
         count_el = body.find(".//{*}NewForwardNumberOfEntries")
         if count_el is None or not count_el.text:
             return set()
         count = int(count_el.text)
 
-        routes: set[tuple[str, str]] = set()
+        routes: set[tuple[str, str, str]] = set()
         for i in range(count):
             entry = self._soap("GetGenericForwardingEntry",
                                {"NewForwardingIndex": str(i)})
             dest = entry.findtext(".//{*}NewDestIPAddress", default="").strip()
             mask = entry.findtext(".//{*}NewDestSubnetMask", default="").strip()
+            gw   = entry.findtext(".//{*}NewGatewayIPAddress", default="").strip()
             if dest and mask:
-                routes.add((dest, mask))
+                routes.add((dest, mask, gw))
         return routes
-
-    def get_route_gateway(self, dest: str, mask: str) -> Optional[str]:
-        """Return the gateway IP for a specific route, or None if not found."""
-        body = self._soap("GetForwardNumberOfEntries")
-        count_el = body.find(".//{*}NewForwardNumberOfEntries")
-        if count_el is None or not count_el.text:
-            return None
-        count = int(count_el.text)
-
-        for i in range(count):
-            entry = self._soap("GetGenericForwardingEntry",
-                               {"NewForwardingIndex": str(i)})
-            e_dest = entry.findtext(".//{*}NewDestIPAddress", default="").strip()
-            e_mask = entry.findtext(".//{*}NewDestSubnetMask", default="").strip()
-            if e_dest == dest and e_mask == mask:
-                return entry.findtext(".//{*}NewGatewayIPAddress", default="").strip()
-        return None
 
     def add_route(self, dest: str, mask: str, gateway: str) -> None:
         self._soap("AddForwardingEntry", {
