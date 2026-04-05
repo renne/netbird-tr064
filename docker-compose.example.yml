@@ -1,0 +1,20 @@
+# Example: integrating netbird-tr064 into a self-hosted NetBird Docker Compose stack.
+# Place this service in the same compose file as your NetBird management container,
+# or in a separate compose file sharing the same Docker network.
+
+services:
+  netbird-tr064:
+    image: ghcr.io/renne/netbird-tr064:latest
+    restart: unless-stopped
+    volumes:
+      - ./netbird-tr064/config.yaml:/config/config.yaml:ro
+    environment:
+      LOG_LEVEL: INFO        # DEBUG for verbose SOAP traces
+    networks:
+      - netbird              # must reach netbird-management container
+    depends_on:
+      - netbird-management
+
+networks:
+  netbird:
+    external: true           # attach to existing network created by the NetBird stack
