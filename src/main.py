@@ -58,7 +58,7 @@ def sync_router(router_cfg: dict, netbird_cidrs: set[str]) -> None:
         return
 
     try:
-        existing: set[tuple[str, str]] = backend.get_routes()
+        all_routes: set[tuple[str, str, str]] = backend.get_routes()
     except Exception as exc:
         log.error("Router %s: failed to read routes: %s", name, exc)
         return
@@ -72,10 +72,19 @@ def sync_router(router_cfg: dict, netbird_cidrs: set[str]) -> None:
         except Exception as exc:
             log.warning("Skipping malformed CIDR %s: %s", cidr, exc)
 
-    to_add = desired - existing
-    to_remove = existing - desired
+    # Partition existing routes: owned (our gateway) vs foreign
+    owned         = {(d, m) for d, m, gw in all_routes if gw == gateway}
+    foreign_dests = {(d, m) for d, m, gw in all_routes if gw != gateway}
+
+    to_add     = desired - owned - foreign_dests
+    conflicted = (desired & foreign_dests) - owned
+    to_remove  = owned - desired
 
     changes = 0
+
+    for dest, mask in conflicted:
+        log.warning("[%s] Skipping %s/%s -- destination already covered by a "
+                    "foreign route (not via %s)", name, dest, mask, gateway)
 
     for dest, mask in to_add:
         try:
@@ -86,14 +95,6 @@ def sync_router(router_cfg: dict, netbird_cidrs: set[str]) -> None:
             log.error("[%s] Failed to add %s/%s: %s", name, dest, mask, exc)
 
     for dest, mask in to_remove:
-        # Only delete routes whose gateway matches ours (ownership rule).
-        try:
-            owned = _route_is_ours(backend, dest, mask, gateway)
-        except Exception:
-            owned = False
-        if not owned:
-            log.debug("[%s] Skipping %s/%s — not owned by us", name, dest, mask)
-            continue
         try:
             backend.delete_route(dest, mask)
             log.info("[%s] - %s/%s", name, dest, mask)
@@ -103,15 +104,6 @@ def sync_router(router_cfg: dict, netbird_cidrs: set[str]) -> None:
 
     if changes == 0:
         log.debug("[%s] No changes needed", name)
-
-
-def _route_is_ours(backend, dest: str, mask: str, our_gateway: str) -> bool:
-    """Return True if the route's gateway matches our managed gateway."""
-    get_gw = getattr(backend, "get_route_gateway", None)
-    if get_gw is None:
-        return False
-    gw = get_gw(dest, mask)
-    return gw == our_gateway
 
 
 def main() -> None:
