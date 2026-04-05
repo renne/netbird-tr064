@@ -5,11 +5,9 @@ Environment variables:
   LOG_LEVEL     Logging verbosity     (default: INFO)
 """
 
-import ipaddress
 import logging
 import os
 import time
-from pathlib import Path
 
 import yaml
 
@@ -75,8 +73,7 @@ def sync_router(router_cfg: dict, netbird_cidrs: set[str]) -> None:
             log.warning("Skipping malformed CIDR %s: %s", cidr, exc)
 
     to_add = desired - existing
-    # Only remove routes that we own (gateway matches) and are no longer desired
-    to_remove = existing - desired  # candidates; ownership check below
+    to_remove = existing - desired
 
     changes = 0
 
@@ -89,12 +86,7 @@ def sync_router(router_cfg: dict, netbird_cidrs: set[str]) -> None:
             log.error("[%s] Failed to add %s/%s: %s", name, dest, mask, exc)
 
     for dest, mask in to_remove:
-        # Skip routes that have a gateway we don't manage (ownership rule)
-        # We cannot read the gateway per route from all TR-064 implementations,
-        # so we track only entries we added in previous cycles.
-        # Conservative approach: only delete if the gateway matches ours.
-        # GetGenericLANIPRouteEntry includes NewGatewayIPAddress on Fritz!Box —
-        # we do a targeted lookup to verify ownership.
+        # Only delete routes whose gateway matches ours (ownership rule).
         try:
             owned = _route_is_ours(backend, dest, mask, gateway)
         except Exception:
@@ -115,25 +107,11 @@ def sync_router(router_cfg: dict, netbird_cidrs: set[str]) -> None:
 
 def _route_is_ours(backend, dest: str, mask: str, our_gateway: str) -> bool:
     """Return True if the route's gateway matches our managed gateway."""
-    # We re-read all routes and look for the gateway field.
-    # TR-064 GetGenericLANIPRouteEntry includes NewGatewayIPAddress on most devices.
-    # If we can't determine ownership, we skip deletion to be safe.
-    count_result = backend._lan_action("GetLANIPRouteNumberOfEntries")
-    import xml.etree.ElementTree as ET
-    count_el = count_result.find(".//{*}NewNumberOfEntries")
-    if count_el is None:
+    get_gw = getattr(backend, "get_route_gateway", None)
+    if get_gw is None:
         return False
-    count = int(count_el.text or "0")
-
-    for i in range(count):
-        entry = backend._lan_action("GetGenericLANIPRouteEntry",
-                                    {"NewIndex": str(i)})
-        e_dest = entry.findtext(".//{*}NewDestIPAddress", default="").strip()
-        e_mask = entry.findtext(".//{*}NewDestSubnetMask", default="").strip()
-        if e_dest == dest and e_mask == mask:
-            e_gw = entry.findtext(".//{*}NewGatewayIPAddress", default="").strip()
-            return e_gw == our_gateway
-    return False
+    gw = get_gw(dest, mask)
+    return gw == our_gateway
 
 
 def main() -> None:
