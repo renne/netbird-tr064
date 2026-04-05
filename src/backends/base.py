@@ -37,10 +37,4 @@ class RouterBackend(ABC):
             mask: Subnet mask in dotted-decimal form
         """
 
-    @abstractmethod
-    def get_default_gateway(self) -> str:
-        """Return the default gateway IP used by this router for LAN-side routing.
 
-        Used to determine ownership of routes when gateway_ip is not specified
-        in config.
-        """

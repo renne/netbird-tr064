@@ -11,8 +11,6 @@ Correct parameters confirmed from avmtools (Gincules/avmtools) and AVM SCPD:
 import ipaddress
 import logging
 import xml.etree.ElementTree as ET
-from typing import Optional
-
 import requests
 from requests.auth import HTTPDigestAuth
 
@@ -55,8 +53,6 @@ class TR064Backend(RouterBackend):
         self._base_url = config["url"].rstrip("/")
         self._username = config.get("username", "")
         self._password = config.get("password", "")
-        self._gateway_ip: Optional[str] = config.get("gateway_ip") or None
-
         self._session = requests.Session()
         self._session.auth = HTTPDigestAuth(self._username, self._password)
 
@@ -178,10 +174,4 @@ class TR064Backend(RouterBackend):
         })
         log.info("Deleted route %s/%s", dest, mask)
 
-    def get_default_gateway(self) -> str:
-        if self._gateway_ip:
-            return self._gateway_ip
-        raise RuntimeError(
-            "gateway_ip must be set in config — it should be the LAN IP of the "
-            "routing peer through which NetBird overlay routes are reachable."
-        )
+

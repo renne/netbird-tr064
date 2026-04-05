@@ -17,10 +17,15 @@ This service was created as a workaround pending native Fritz!OS support
    traffic, so no static route is needed on the gateway router.
 4. Adds missing routes via `AddLANIPRoute` and removes orphaned routes via
    `DeleteLANIPRoute`.
-5. Uses an **ownership rule**: only routes whose gateway address matches the
-   configured `gateway_ip` are ever deleted — foreign routes are never touched.
+5. Uses an **ownership rule**: only routes whose gateway address matches one of
+   the configured peer LAN IPs are ever touched — foreign routes (e.g. added by
+   WireGuard VPN or manually) are never deleted.
    If a desired destination is already covered by a foreign route, a `WARNING`
    is logged and the route is skipped.
+6. **Dynamic failover**: for each CIDR, the daemon picks the first online peer
+   (in config order) as the active gateway. If that peer goes offline, the route
+   is re-pointed to the next available peer within one `poll_interval`. If all
+   peers are offline, the route is removed to avoid a silent blackhole.
 
 Because NetBird has no management-plane webhooks
 ([#1596](https://github.com/netbirdio/netbird/issues/1596),
@@ -81,7 +86,9 @@ routers:
     url: "http://192.168.178.1:49000"
     username: "admin"
     password: "secret"
-    gateway_ip: "192.168.178.x"  # LAN IP of the NetBird routing peer (required)
+    peers:
+      "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx": "192.168.178.x"  # primary routing peer
+      # "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy": "192.168.178.y"  # secondary (HA failover)
 ```
 
 ### Fields
@@ -97,7 +104,29 @@ routers:
 | `routers[].url` | Yes | — | TR-064 base URL (e.g. `http://192.168.178.1:49000`) |
 | `routers[].username` | Yes | — | Router admin username |
 | `routers[].password` | Yes | — | Router admin password |
-| `routers[].gateway_ip` | Yes | — | LAN IP of the NetBird routing peer; used as next-hop and to identify owned routes |
+| `routers[].peers` | Yes | — | Map of `peer_id → LAN IP` for routing peers; defines next-hop addresses. Peers tried in order — first online wins. |
+
+### Routing peers
+
+Each router requires a `peers` map linking NetBird peer IDs to their LAN IP
+addresses on that router's network.
+
+**Finding a peer ID:** run `netbird status` on the routing peer device — the peer
+ID is shown at the top. It is also visible in the NetBird management dashboard
+under **Peers**.
+
+**Stable IP requirement:** the LAN IP must not change, because the Fritz!Box uses
+it as the static route next-hop. Use either a static IP configured on the peer
+itself, or a DHCP reservation (fixed lease by MAC address) on the Fritz!Box.
+
+**High availability:** list multiple peers in priority order. The daemon always
+selects the first *online* peer for each route CIDR. If the primary goes offline,
+the route is automatically re-pointed to the next peer within one `poll_interval`.
+If all peers are offline, the route is removed.
+
+> **TODO:** Auto-derive the LAN IP from the NetBird management server once the API
+> exposes per-peer LAN interface information, removing the need to configure the
+> `peers` map manually.
 
 ### Environment variables
 
@@ -118,25 +147,28 @@ routers:
     url: "http://10.0.0.1:49000"
     username: "admin"
     password: "secret1"
+    peers:
+      "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx": "10.0.0.x"
 
   - name: "fritzbox-site-b"
     backend: tr064
     url: "http://192.168.178.1:49000"
     username: "admin"
     password: "secret2"
+    peers:
+      "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy": "192.168.178.x"
 ```
 
 ## Adding router backends
 
 The `RouterBackend` ABC lives in `src/backends/base.py`.
-Implement four methods and register the backend in `src/backends/__init__.py`:
+Implement three methods and register the backend in `src/backends/__init__.py`:
 
 ```python
 class RouterBackend(ABC):
     def get_routes(self) -> set[tuple[str, str, str]]: ...  # {(dest_ip, mask, gateway_ip), …}
     def add_route(self, dest: str, mask: str, gateway: str) -> None: ...
     def delete_route(self, dest: str, mask: str) -> None: ...
-    def get_default_gateway(self) -> str: ...
 ```
 
 Register in `src/backends/__init__.py`:

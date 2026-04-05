@@ -24,11 +24,21 @@ routers:
     username: "admin"
     password: "changeme"
 
-    # LAN IP of the NetBird routing peer -- the device that routes overlay traffic
-    # into this LAN (e.g. the peer running the netbird client as a subnet router).
-    # Required -- this value is used as the next-hop when adding routes and to
-    # identify which existing routes are owned by this service.
-    gateway_ip: "192.168.178.x"
+    # Map of NetBird peer ID to LAN IP for routing peers on this router's network.
+    # The daemon polls peer online status and picks the first online peer (in order)
+    # as the active next-hop for each CIDR. If the active peer goes offline the route
+    # is re-pointed to the next peer within one poll_interval. If all peers are
+    # offline the route is removed (avoids silent blackhole).
+    #
+    # How to find a peer ID: run `netbird status` on the routing peer, or look in
+    # the NetBird management dashboard under Peers.
+    #
+    # The LAN IP must remain stable -- use a static IP or a DHCP reservation.
+    #
+    # TODO: auto-derive from NetBird API once per-peer LAN interface info is available.
+    peers:
+      "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx": "192.168.178.x"  # primary routing peer
+      # "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy": "192.168.178.y"  # secondary (HA failover)
 
   # Add more routers below -- any TR-064 compliant device works
   # - name: "fritzbox-second-site"
@@ -36,4 +46,5 @@ routers:
   #   url: "http://10.0.0.1:49000"
   #   username: "admin"
   #   password: "changeme"
-  #   gateway_ip: "10.0.0.x"
+  #   peers:
+  #     "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz": "10.0.0.x"

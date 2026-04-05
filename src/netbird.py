@@ -25,33 +25,46 @@ class NetBirdClient:
         self._session.headers["Authorization"] = f"Token {api_token}"
         self._session.headers["Accept"] = "application/json"
 
-    def get_routes(self, only_enabled: bool = True) -> set[str]:
-        """Return the set of route CIDRs currently defined in NetBird.
+    def get_routes(self, only_enabled: bool = True) -> dict[str, set[str]]:
+        """Return routes grouped by peer ID.
 
-        Each entry is a canonical CIDR string (e.g., "10.1.0.0/24").
-        Only IPv4 routes are returned; IPv6 entries are silently skipped.
-        Routes with masquerade=true are skipped -- the subnet router NATs
-        overlay traffic so the gateway router needs no static route.
+        Returns:
+            Mapping of peer_id -> set of canonical CIDR strings.
+            Only IPv4 routes are included; masquerade=true routes are skipped.
         """
         url = f"{self._api_base}/routes"
         resp = self._session.get(url, timeout=15)
         resp.raise_for_status()
         data = resp.json()
 
-        cidrs: set[str] = set()
+        result: dict[str, set[str]] = {}
         for route in data:
             if only_enabled and not route.get("enabled", True):
                 continue
             if route.get("masquerade", False):
                 log.debug("Skipping masquerade=true route: %s", route.get("network", ""))
                 continue
+            peer_id = route.get("peer", "").strip()
+            if not peer_id:
+                continue
             network = route.get("network", "").strip()
             if not network:
                 continue
             try:
                 net = ipaddress.IPv4Network(network, strict=False)
-                cidrs.add(str(net))
+                result.setdefault(peer_id, set()).add(str(net))
             except (ValueError, ipaddress.AddressValueError):
-                # Skip IPv6 or malformed entries
                 log.debug("Skipping non-IPv4 route: %s", network)
-        return cidrs
+        return result
+
+    def get_peer_statuses(self) -> dict[str, bool]:
+        """Return connection status for all peers.
+
+        Returns:
+            Mapping of peer_id -> is_connected.
+        """
+        url = f"{self._api_base}/peers"
+        resp = self._session.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        return {p["id"]: bool(p.get("connected", False)) for p in data if p.get("id")}

@@ -35,8 +35,18 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def sync_router(router_cfg: dict, netbird_cidrs: set[str]) -> None:
-    """Reconcile one router against the current NetBird route set."""
+def sync_router(
+    router_cfg: dict,
+    route_map: dict[str, set[str]],
+    peer_status: dict[str, bool],
+) -> None:
+    """Reconcile one router against the current NetBird route set.
+
+    For each CIDR, the first configured+online peer (by config order) is used
+    as the active gateway.  If the active gateway changes, the old Fritz!Box
+    route is removed and a new one is added.  If all covering peers go offline,
+    the route is removed to avoid a silent blackhole.
+    """
     name = router_cfg.get("name", router_cfg["url"])
     backend_key = router_cfg.get("backend", "tr064").lower()
 
@@ -51,11 +61,26 @@ def sync_router(router_cfg: dict, netbird_cidrs: set[str]) -> None:
         log.error("Router %s: failed to initialise backend: %s", name, exc)
         return
 
-    try:
-        gateway = router_cfg.get("gateway_ip") or backend.get_default_gateway()
-    except Exception as exc:
-        log.error("Router %s: cannot determine gateway: %s", name, exc)
+    router_peers: dict[str, str] = router_cfg.get("peers", {})
+    if not router_peers:
+        log.error("Router %s: no 'peers' map in config — skipping", name)
         return
+
+    # Build active_routes: (dest, mask) → gateway_ip
+    # First configured+online peer wins per CIDR.
+    active_routes: dict[tuple[str, str], str] = {}
+    for peer_id, lan_ip in router_peers.items():
+        if not peer_status.get(peer_id, False):
+            log.debug("Router %s: peer %s is offline", name, peer_id)
+            continue
+        for cidr in route_map.get(peer_id, set()):
+            try:
+                dest, mask = _cidr_to_mask(cidr)
+            except Exception as exc:
+                log.warning("Skipping malformed CIDR %s: %s", cidr, exc)
+                continue
+            if (dest, mask) not in active_routes:
+                active_routes[(dest, mask)] = lan_ip
 
     try:
         all_routes: set[tuple[str, str, str]] = backend.get_routes()
@@ -63,44 +88,48 @@ def sync_router(router_cfg: dict, netbird_cidrs: set[str]) -> None:
         log.error("Router %s: failed to read routes: %s", name, exc)
         return
 
-    # Build desired set as (dest, mask) tuples
-    desired: set[tuple[str, str]] = set()
-    for cidr in netbird_cidrs:
-        try:
-            dest, mask = _cidr_to_mask(cidr)
-            desired.add((dest, mask))
-        except Exception as exc:
-            log.warning("Skipping malformed CIDR %s: %s", cidr, exc)
-
-    # Partition existing routes: owned (our gateway) vs foreign
-    owned         = {(d, m) for d, m, gw in all_routes if gw == gateway}
-    foreign_dests = {(d, m) for d, m, gw in all_routes if gw != gateway}
-
-    to_add     = desired - owned - foreign_dests
-    conflicted = (desired & foreign_dests) - owned
-    to_remove  = owned - desired
+    owned_ips = set(router_peers.values())
 
     changes = 0
 
-    for dest, mask in conflicted:
-        log.warning("[%s] Skipping %s/%s -- destination already covered by a "
-                    "foreign route (not via %s)", name, dest, mask, gateway)
+    # Add or update routes
+    for (dest, mask), gw in active_routes.items():
+        current_gw = next(
+            (g for d, m, g in all_routes if d == dest and m == mask), None
+        )
+        if current_gw is None:
+            try:
+                backend.add_route(dest, mask, gw)
+                log.info("[%s] + %s/%s via %s", name, dest, mask, gw)
+                changes += 1
+            except Exception as exc:
+                log.error("[%s] Failed to add %s/%s: %s", name, dest, mask, exc)
+        elif current_gw != gw:
+            try:
+                backend.delete_route(dest, mask)
+                backend.add_route(dest, mask, gw)
+                log.info("[%s] ~ %s/%s via %s -> %s", name, dest, mask, current_gw, gw)
+                changes += 1
+            except Exception as exc:
+                log.error("[%s] Failed to update %s/%s: %s", name, dest, mask, exc)
+        else:
+            # Foreign route covers the same destination — warn and skip
+            if current_gw not in owned_ips:
+                log.warning(
+                    "[%s] Skipping %s/%s — destination already covered by a "
+                    "foreign route (gateway %s, not managed by this service)",
+                    name, dest, mask, current_gw,
+                )
 
-    for dest, mask in to_add:
-        try:
-            backend.add_route(dest, mask, gateway)
-            log.info("[%s] + %s/%s via %s", name, dest, mask, gateway)
-            changes += 1
-        except Exception as exc:
-            log.error("[%s] Failed to add %s/%s: %s", name, dest, mask, exc)
-
-    for dest, mask in to_remove:
-        try:
-            backend.delete_route(dest, mask)
-            log.info("[%s] - %s/%s", name, dest, mask)
-            changes += 1
-        except Exception as exc:
-            log.error("[%s] Failed to delete %s/%s: %s", name, dest, mask, exc)
+    # Remove owned routes that have no active peer
+    for dest, mask, gw in all_routes:
+        if gw in owned_ips and (dest, mask) not in active_routes:
+            try:
+                backend.delete_route(dest, mask)
+                log.info("[%s] - %s/%s (no active peer)", name, dest, mask)
+                changes += 1
+            except Exception as exc:
+                log.error("[%s] Failed to delete %s/%s: %s", name, dest, mask, exc)
 
     if changes == 0:
         log.debug("[%s] No changes needed", name)
@@ -138,15 +167,17 @@ def main() -> None:
 
     while True:
         try:
-            netbird_cidrs = nb_client.get_routes(only_enabled=only_enabled)
-            log.debug("NetBird routes: %s", netbird_cidrs)
+            route_map = nb_client.get_routes(only_enabled=only_enabled)
+            peer_status = nb_client.get_peer_statuses()
+            log.debug("NetBird route_map: %s", route_map)
+            log.debug("NetBird peer_status: %s", peer_status)
         except Exception as exc:
-            log.error("Failed to fetch NetBird routes: %s", exc)
+            log.error("Failed to fetch NetBird data: %s", exc)
             time.sleep(poll_interval)
             continue
 
         for router_cfg in routers_cfg:
-            sync_router(router_cfg, netbird_cidrs)
+            sync_router(router_cfg, route_map, peer_status)
 
         time.sleep(poll_interval)
 
