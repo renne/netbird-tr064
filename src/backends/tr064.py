@@ -56,7 +56,7 @@ class TR064Backend(RouterBackend):
         self._session = requests.Session()
         self._session.auth = HTTPDigestAuth(self._username, self._password)
 
-        self._control_url: Optional[str] = None
+        self._control_url: str | None = None
         self._discover()
 
     # ------------------------------------------------------------------ #
@@ -148,9 +148,36 @@ class TR064Backend(RouterBackend):
             dest = entry.findtext(".//{*}NewDestIPAddress", default="").strip()
             mask = entry.findtext(".//{*}NewDestSubnetMask", default="").strip()
             gw   = entry.findtext(".//{*}NewGatewayIPAddress", default="").strip()
-            if dest and mask:
+            if dest and mask and dest != "0.0.0.0":
                 routes.add((dest, mask, gw))
         return routes
+
+    def purge_zero_routes(self) -> int:
+        """Remove zeroed entries left by Fritz!Box's DeleteForwardingEntry quirk.
+
+        AVM firmware does not physically remove static route entries — it zeroes
+        all fields (dest=0.0.0.0, mask=0.0.0.0, gw=0.0.0.0).  These ghost entries
+        prevent re-adding the same route and accumulate across restarts.
+
+        This method calls DeleteForwardingEntry("0.0.0.0", "0.0.0.0") repeatedly
+        until the router signals no matching entry remains (typically a SOAP fault).
+
+        Returns:
+            Number of zero entries successfully removed.
+        """
+        removed = 0
+        for _ in range(50):  # safety cap — Fritz!Box supports at most ~50 static routes
+            try:
+                self._soap("DeleteForwardingEntry", {
+                    "NewDestIPAddress": "0.0.0.0",
+                    "NewDestSubnetMask": "0.0.0.0",
+                    "NewSourceIPAddress": "0.0.0.0",
+                    "NewSourceSubnetMask": "0.0.0.0",
+                })
+                removed += 1
+            except Exception:
+                break
+        return removed
 
     def add_route(self, dest: str, mask: str, gateway: str) -> None:
         self._soap("AddForwardingEntry", {
@@ -173,5 +200,3 @@ class TR064Backend(RouterBackend):
             "NewSourceSubnetMask": "0.0.0.0",
         })
         log.info("Deleted route %s/%s", dest, mask)
-
-
