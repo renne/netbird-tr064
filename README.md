@@ -9,8 +9,9 @@ This service was created as a workaround pending native Fritz!OS support
 
 ## How it works
 
-1. Polls `GET /api/routes` on your NetBird management server (or cloud API) every
-   `poll_interval` seconds.
+1. Uses the Networks API (`GET /api/networks` → `/resources` + `/routers`) to
+   fetch the current route set from your NetBird management server (or cloud API)
+   every `poll_interval` seconds.
 2. Compares the current NetBird route set against the static routes already present
    in each configured router.
 3. Skips routes with `masquerade=true` — the subnet router NATes overlay

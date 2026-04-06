@@ -5,9 +5,11 @@ Environment variables:
   LOG_LEVEL     Logging verbosity     (default: INFO)
 """
 
+import ipaddress
 import logging
 import os
 import time
+from typing import Optional
 
 import yaml
 
@@ -39,13 +41,27 @@ def sync_router(
     router_cfg: dict,
     route_map: dict[str, set[str]],
     peer_status: dict[str, bool],
+    overlay_cidr: Optional[str] = None,
 ) -> None:
     """Reconcile one router against the current NetBird route set.
 
-    For each CIDR, the first configured+online peer (by config order) is used
-    as the active gateway.  If the active gateway changes, the old Fritz!Box
-    route is removed and a new one is added.  If all covering peers go offline,
-    the route is removed to avoid a silent blackhole.
+    Architecture
+    ------------
+    For each Fritz!Box, the configured ``peers`` map lists the routing peers
+    physically on *this* router's LAN (local peers).  The daemon:
+
+    1. Computes ``local_cidrs`` — all subnets advertised by local peers.
+    2. Computes ``remote_cidrs`` — all subnets in route_map minus local_cidrs
+       (i.e. subnets that live at *other* sites and must be reached via the
+       NetBird overlay).
+    3. If ``overlay_cidr`` is set, adds it to remote_cidrs so LAN devices can
+       reach overlay IPs (e.g. 100.64.0.0/10) directly.
+    4. Picks the first configured+online local peer as the gateway (LAN IP).
+    5. Injects all remote_cidrs via that gateway.  If no local peer is online,
+       removes all owned routes to avoid silent blackholes.
+
+    Failover: if the primary local peer goes offline, the next configured peer
+    (by config order) becomes the gateway and all remote routes are updated.
     """
     name = router_cfg.get("name", router_cfg["url"])
     backend_key = router_cfg.get("backend", "tr064").lower()
@@ -66,21 +82,44 @@ def sync_router(
         log.error("Router %s: no 'peers' map in config — skipping", name)
         return
 
-    # Build active_routes: (dest, mask) → gateway_ip
-    # First configured+online peer wins per CIDR.
-    active_routes: dict[tuple[str, str], str] = {}
+    # Determine gateway: first configured+online local peer wins
+    active_gw: Optional[str] = None
     for peer_id, lan_ip in router_peers.items():
-        if not peer_status.get(peer_id, False):
+        if peer_status.get(peer_id, False):
+            active_gw = lan_ip
+            log.debug("Router %s: active gateway is %s (peer %s)", name, lan_ip, peer_id)
+            break
+        else:
             log.debug("Router %s: peer %s is offline", name, peer_id)
-            continue
-        for cidr in route_map.get(peer_id, set()):
+
+    # Compute local CIDRs (subnets this router's own LAN peers advertise)
+    local_cidrs: set[str] = set()
+    for peer_id in router_peers:
+        local_cidrs.update(route_map.get(peer_id, set()))
+
+    # Remote CIDRs are everything else — routes to other sites
+    all_cidrs: set[str] = set()
+    for cidrs in route_map.values():
+        all_cidrs.update(cidrs)
+    remote_cidrs = all_cidrs - local_cidrs
+
+    # Include the NetBird overlay network so LAN devices can reach overlay IPs
+    if overlay_cidr:
+        try:
+            net = ipaddress.IPv4Network(overlay_cidr, strict=False)
+            remote_cidrs.add(str(net))
+        except ValueError:
+            log.warning("[%s] Invalid overlay_cidr '%s' — ignoring", name, overlay_cidr)
+
+    # Build desired state: (dest, mask) → gateway_ip
+    active_routes: dict[tuple[str, str], str] = {}
+    if active_gw:
+        for cidr in remote_cidrs:
             try:
                 dest, mask = _cidr_to_mask(cidr)
+                active_routes[(dest, mask)] = active_gw
             except Exception as exc:
                 log.warning("Skipping malformed CIDR %s: %s", cidr, exc)
-                continue
-            if (dest, mask) not in active_routes:
-                active_routes[(dest, mask)] = lan_ip
 
     try:
         all_routes: set[tuple[str, str, str]] = backend.get_routes()
@@ -104,7 +143,15 @@ def sync_router(
                 changes += 1
             except Exception as exc:
                 log.error("[%s] Failed to add %s/%s: %s", name, dest, mask, exc)
-        elif current_gw != gw:
+        elif current_gw == gw:
+            pass  # already correct
+        elif current_gw not in owned_ips:
+            log.warning(
+                "[%s] Skipping %s/%s — destination already covered by a "
+                "foreign route (gateway %s, not managed by this service)",
+                name, dest, mask, current_gw,
+            )
+        else:
             try:
                 backend.delete_route(dest, mask)
                 backend.add_route(dest, mask, gw)
@@ -112,16 +159,8 @@ def sync_router(
                 changes += 1
             except Exception as exc:
                 log.error("[%s] Failed to update %s/%s: %s", name, dest, mask, exc)
-        else:
-            # Foreign route covers the same destination — warn and skip
-            if current_gw not in owned_ips:
-                log.warning(
-                    "[%s] Skipping %s/%s — destination already covered by a "
-                    "foreign route (gateway %s, not managed by this service)",
-                    name, dest, mask, current_gw,
-                )
 
-    # Remove owned routes that have no active peer
+    # Remove owned routes that are no longer desired
     for dest, mask, gw in all_routes:
         if gw in owned_ips and (dest, mask) not in active_routes:
             try:
@@ -169,15 +208,17 @@ def main() -> None:
         try:
             route_map = nb_client.get_routes(only_enabled=only_enabled)
             peer_status = nb_client.get_peer_statuses()
+            overlay_cidr: Optional[str] = nb_client.get_overlay_network()
             log.debug("NetBird route_map: %s", route_map)
             log.debug("NetBird peer_status: %s", peer_status)
+            log.debug("NetBird overlay_cidr: %s", overlay_cidr)
         except Exception as exc:
             log.error("Failed to fetch NetBird data: %s", exc)
             time.sleep(poll_interval)
             continue
 
         for router_cfg in routers_cfg:
-            sync_router(router_cfg, route_map, peer_status)
+            sync_router(router_cfg, route_map, peer_status, overlay_cidr=overlay_cidr)
 
         time.sleep(poll_interval)
 
