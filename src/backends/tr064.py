@@ -189,6 +189,7 @@ class TR064Backend(RouterBackend):
             "NewGatewayIPAddress": gateway,
             "NewInterface": ROUTE_INTERFACE,
             "NewForwardingMetric": "0",
+            "NewEnable": "1",
         })
         log.info("Added route %s/%s via %s", dest, mask, gateway)
 
