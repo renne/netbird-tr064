@@ -197,6 +197,8 @@ class TR064Backend(RouterBackend):
         return removed
 
     def add_route(self, dest: str, mask: str, gateway: str) -> None:
+        # Fritz!Box rejects NewEnable=1 in AddForwardingEntry (UPnP error 501).
+        # Routes are created disabled; a separate SetForwardingEntryEnable call enables them.
         self._soap("AddForwardingEntry", {
             "NewType": ROUTE_TYPE,
             "NewDestIPAddress": dest,
@@ -206,6 +208,12 @@ class TR064Backend(RouterBackend):
             "NewGatewayIPAddress": gateway,
             "NewInterface": ROUTE_INTERFACE,
             "NewForwardingMetric": "0",
+        })
+        self._soap("SetForwardingEntryEnable", {
+            "NewDestIPAddress": dest,
+            "NewDestSubnetMask": mask,
+            "NewSourceIPAddress": "0.0.0.0",
+            "NewSourceSubnetMask": "0.0.0.0",
             "NewEnable": "1",
         })
         log.info("Added route %s/%s via %s", dest, mask, gateway)
