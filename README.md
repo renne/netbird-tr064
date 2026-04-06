@@ -181,12 +181,19 @@ BACKENDS = {
 }
 ```
 
+## Tested hardware
+
+| Device | FRITZ!OS |
+|---|---|
+| FRITZ!Box 7530 AX | 8.20 |
+| FRITZ!Box 7690 | 8.20 |
+
 ## TR-064 standard
 
 TR-064 (Broadband Forum) is implemented by Fritz!Box, Teltonika, and many other
 consumer and SMB routers. The TR-064 backend in this project uses only:
 
-- `LANIPRoute:1` — static route management
+- `Layer3Forwarding:1` — static route management
 - HTTP Digest Auth (RFC 2617) with Basic Auth fallback
 - `requests` + `xml.etree.ElementTree` — no vendor-specific library
 
