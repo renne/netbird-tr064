@@ -72,9 +72,11 @@ def sync_router(
         (e.g. 100.91.0.0/16).  Useful for routers that reject CGNAT routes
         (Fritz!Box 7530 AX returns HTTP 500 for 100.x.x.x destinations).
     exclude_subnets : list[str], default []
-        CIDRs to exclude from injection.  Use this for subnets the router
-        already knows via its own WireGuard VPN (e.g. the remote-site LAN)
-        to avoid conflicts with auto-installed VPN routes.
+        CIDRs to exclude from both injection *and* deletion.  Use this for
+        subnets the router already knows via its own WireGuard VPN (e.g. the
+        remote-site LAN) to avoid conflicts with auto-installed VPN routes,
+        or for manually-managed routes the daemon must never touch (e.g. a
+        CGNAT supernet added via the Fritz!Box web UI when TR-064 rejects it).
     """
     name = router_cfg.get("name", router_cfg["url"])
     backend_key = router_cfg.get("backend", "tr064").lower()
@@ -127,8 +129,8 @@ def sync_router(
 
     # Remove subnets the router already knows (e.g. via its own WireGuard VPN)
     exclude_subnets = router_cfg.get("exclude_subnets", [])
+    exclude_nets: list[ipaddress.IPv4Network] = []
     if exclude_subnets:
-        exclude_nets: list[ipaddress.IPv4Network] = []
         for s in exclude_subnets:
             try:
                 exclude_nets.append(ipaddress.IPv4Network(s, strict=False))
@@ -209,6 +211,14 @@ def sync_router(
     # Remove owned routes that are no longer desired
     for dest, mask, gw in all_routes:
         if gw in owned_ips and (dest, mask) not in active_routes:
+            if exclude_nets:
+                try:
+                    route_net = ipaddress.IPv4Network(f"{dest}/{mask}", strict=False)
+                    if any(route_net.subnet_of(excl) for excl in exclude_nets):
+                        log.debug("[%s] Preserving %s/%s (covered by exclude_subnets)", name, dest, mask)
+                        continue
+                except ValueError:
+                    pass
             try:
                 backend.delete_route(dest, mask)
                 log.info("[%s] - %s/%s (no active peer)", name, dest, mask)
