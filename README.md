@@ -106,8 +106,8 @@ routers:
 | `routers[].username` | Yes | — | Router admin username |
 | `routers[].password` | Yes | — | Router admin password |
 | `routers[].peers` | Yes | — | Map of `peer_id → LAN IP` for routing peers; defines next-hop addresses. Peers tried in order — first online wins. |
-| `routers[].inject_overlay_cidr` | No | `true` | Inject the NetBird overlay CIDR (`100.x.x.x/16`) as a route. Disable for Fritz!Box units that reject CGNAT-range routes (HTTP 500). |
-| `routers[].exclude_subnets` | No | `[]` | List of CIDRs to never inject, even if present in NetBird. Use for subnets already covered by a Fritz!Box VPN tunnel (see [VPN route limitation](#vpn-route-limitation--exclude_subnets-is-always-manual)). |
+| `routers[].inject_overlay_cidr` | No | `true` | Inject the NetBird overlay CIDR (`100.x.x.x/16`) as a static route. Disable for Fritz!Box units that reject CGNAT-range TR-064 writes (HTTP 500). ⚠️ If the overlay CIDR is a subnet of any `exclude_subnets` entry, injection is silently skipped — no warning is logged. See [silent no-op note](#inject_overlay_cidr--exclude_subnets-silent-no-op). |
+| `routers[].exclude_subnets` | No | `[]` | CIDRs to **skip and protect**: never injected even if present in NetBird, *and* existing routes matching them are never deleted. Use for subnets covered by a Fritz!Box VPN tunnel, or to protect manually-added anchor routes. See [VPN route limitation](#vpn-route-limitation--exclude_subnets-is-always-manual) and [silent no-op note](#inject_overlay_cidr--exclude_subnets-silent-no-op). |
 
 ### Routing peers
 
@@ -151,6 +151,53 @@ The `exclude_subnets` list is how you tell the daemon to skip those CIDRs entire
 >
 > Whenever you add, remove, or change a WireGuard or IPsec tunnel on a Fritz!Box,
 > update `exclude_subnets` in `config.yaml` accordingly and restart the daemon.
+
+### `exclude_subnets` — dual behavior
+
+`exclude_subnets` has two distinct effects on every sync cycle:
+
+1. **Injection suppression** — any NetBird-advertised route whose CIDR is covered by an
+   excluded entry is never added to the Fritz!Box.
+2. **Deletion protection** — any *existing* Fritz!Box static route whose CIDR is covered
+   by an excluded entry is never deleted by the daemon, even if it is absent from NetBird.
+
+This makes `exclude_subnets` the right place for:
+- Subnets that belong to a Fritz!Box VPN tunnel (avoid collision + avoid deletion of the VPN anchor).
+- Manually-added supernet "anchor" routes (e.g. `100.64.0.0/10`) that the daemon cannot write itself.
+
+### `inject_overlay_cidr` + `exclude_subnets` — silent no-op
+
+> ⚠️ **No warning is logged when this condition occurs.**
+
+`inject_overlay_cidr: true` computes the NetBird overlay CIDR (typically `100.91.0.0/16`) and
+injects it as an additional desired route before the sync loop runs.  
+If the overlay CIDR is a **subnet of any `exclude_subnets` entry**, it is filtered out of the
+desired-route set and injection is silently skipped.
+
+**Example — Fritz!Box 7530 AX with CGNAT supernet workaround:**
+
+```yaml
+routers:
+  - name: fritzbox-weissdornweg
+    inject_overlay_cidr: true          # wants to inject 100.91.0.0/16
+    exclude_subnets:
+      - "192.168.178.0/24"             # remote LAN via Fritz!Box-to-Fritz!Box VPN
+      - "100.64.0.0/10"                # ← 100.91.0.0/16 ⊂ 100.64.0.0/10 → injection silently suppressed
+```
+
+The Fritz!Box 7530 AX rejects CGNAT-range (`100.x.x.x`) TR-064 writes with HTTP 500, so the
+supernet must be added **manually via the web UI** and protected by `exclude_subnets`:
+
+| Field | Value |
+|---|---|
+| **Network address** | `100.64.0.0` |
+| **Subnet mask** | `255.192.0.0` |
+| **Gateway** | LAN IP of the routing peer (e.g. `10.0.0.7`) |
+
+Both pieces must be maintained together:
+
+- **Remove `100.64.0.0/10` from `exclude_subnets`** → daemon gains no new write capability (still HTTP 500), but will attempt to delete or re-manage the manually-set route on the next cycle, causing a sync error.
+- **Remove the manual route from the Fritz!Box** → Netbird peers become unreachable from this LAN until the route is re-added.
 
 ### Environment variables
 
