@@ -54,8 +54,8 @@ def sync_router(
     2. Computes ``remote_cidrs`` -- all subnets in route_map minus local_cidrs
        (i.e. subnets that live at *other* sites and must be reached via the
        NetBird overlay).
-    3. If ``overlay_cidr`` is set and ``inject_overlay_cidr`` is true (default),
-       adds it to remote_cidrs so LAN devices can reach overlay IPs directly.
+    3. Adds ``overlay_cidr`` to remote_cidrs so LAN devices can reach
+       NetBird overlay IPs directly.
     4. Removes any CIDR in ``exclude_subnets`` from remote_cidrs (addition
        protection) and preserves any existing router route that falls within
        an excluded subnet (deletion protection).
@@ -69,19 +69,10 @@ def sync_router(
 
     Per-router config options
     -------------------------
-    inject_overlay_cidr : bool, default true
-        Set to false to suppress injection of the NetBird overlay CIDR
-        (e.g. 100.91.0.0/16).  Useful for routers that reject CGNAT routes
-        via TR-064 (Fritz!Box 7530 AX returns HTTP 500 for 100.x.x.x
-        destinations).  The overlay CIDR can still be added manually via the
-        web UI; add it to ``exclude_subnets`` to prevent the daemon from
-        removing it.
     exclude_subnets : list[str], default []
         CIDRs to exclude from injection *and* from deletion.  Use this for
         subnets the router already knows via its own WireGuard VPN (e.g. the
-        remote-site LAN) to avoid conflicts, and for manually-added routes
-        that the daemon must not remove (e.g. a CGNAT supernet added via the
-        Fritz!Box web UI when ``inject_overlay_cidr`` is false).
+        remote-site LAN) to avoid conflicts.
     """
     name = router_cfg.get("name", router_cfg["url"])
     backend_key = router_cfg.get("backend", "tr064").lower()
@@ -123,9 +114,8 @@ def sync_router(
         all_cidrs.update(cidrs)
     remote_cidrs = all_cidrs - local_cidrs
 
-    # Include the NetBird overlay network so LAN devices can reach overlay IPs
-    inject_overlay = bool(router_cfg.get("inject_overlay_cidr", True))
-    if inject_overlay and overlay_cidr:
+    # Always include the NetBird overlay network so LAN devices can reach overlay IPs
+    if overlay_cidr:
         try:
             net = ipaddress.IPv4Network(overlay_cidr, strict=False)
             remote_cidrs.add(str(net))
@@ -272,7 +262,7 @@ def main() -> None:
         try:
             route_map = nb_client.get_routes(only_enabled=only_enabled)
             peer_status = nb_client.get_peer_statuses()
-            overlay_cidr: Optional[str] = nb_client.get_overlay_network()
+            overlay_cidr = nb_client.get_overlay_network()
             log.debug("NetBird route_map: %s", route_map)
             log.debug("NetBird peer_status: %s", peer_status)
             log.debug("NetBird overlay_cidr: %s", overlay_cidr)
