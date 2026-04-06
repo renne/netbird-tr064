@@ -106,6 +106,8 @@ routers:
 | `routers[].username` | Yes | — | Router admin username |
 | `routers[].password` | Yes | — | Router admin password |
 | `routers[].peers` | Yes | — | Map of `peer_id → LAN IP` for routing peers; defines next-hop addresses. Peers tried in order — first online wins. |
+| `routers[].inject_overlay_cidr` | No | `true` | Inject the NetBird overlay CIDR (`100.x.x.x/16`) as a route. Disable for Fritz!Box units that reject CGNAT-range routes (HTTP 500). |
+| `routers[].exclude_subnets` | No | `[]` | List of CIDRs to never inject, even if present in NetBird. Use for subnets already covered by a Fritz!Box VPN tunnel (see [VPN route limitation](#vpn-route-limitation--exclude_subnets-is-always-manual)). |
 
 ### Routing peers
 
@@ -128,6 +130,27 @@ If all peers are offline, the route is removed.
 > **TODO:** Auto-derive the LAN IP from the NetBird management server once the API
 > exposes per-peer LAN interface information, removing the need to configure the
 > `peers` map manually.
+
+### VPN route limitation — `exclude_subnets` is always manual
+
+Fritz!Box WireGuard and IPsec VPN tunnels automatically install kernel routes for
+their remote subnets. Those routes **collide** with the NetBird routes this daemon
+would inject (e.g. both want `192.168.178.0/24` via different gateways).
+
+The `exclude_subnets` list is how you tell the daemon to skip those CIDRs entirely.
+
+> **⚠️ This list must be maintained manually — forever.**
+>
+> The TR-064 protocol provides no way to read VPN-installed routes:
+>
+> | Fritz!Box VPN type | TR-064 exposure |
+> |---|---|
+> | **WireGuard** (FRITZ!OS 7.50+) | Zero TR-064 API — configured via UI only |
+> | **IPsec site-to-site** | Kernel-internal routes, invisible to all SOAP services |
+> | **IPsec roadwarrior** (`X_AVM-DE_AppSetup:1`) | Write-only credential push; no route read action exists |
+>
+> Whenever you add, remove, or change a WireGuard or IPsec tunnel on a Fritz!Box,
+> update `exclude_subnets` in `config.yaml` accordingly and restart the daemon.
 
 ### Environment variables
 
