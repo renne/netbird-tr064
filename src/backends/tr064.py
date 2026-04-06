@@ -141,15 +141,32 @@ class TR064Backend(RouterBackend):
             return set()
         count = int(count_el.text)
 
-        routes: set[tuple[str, str, str]] = set()
+        # Collect all entries first — deleting during iteration would shift indices
+        collected: list[tuple[str, str, str, str]] = []
         for i in range(count):
             entry = self._soap("GetGenericForwardingEntry",
                                {"NewForwardingIndex": str(i)})
-            dest = entry.findtext(".//{*}NewDestIPAddress", default="").strip()
-            mask = entry.findtext(".//{*}NewDestSubnetMask", default="").strip()
-            gw   = entry.findtext(".//{*}NewGatewayIPAddress", default="").strip()
+            dest    = entry.findtext(".//{*}NewDestIPAddress",    default="").strip()
+            mask    = entry.findtext(".//{*}NewDestSubnetMask",   default="").strip()
+            gw      = entry.findtext(".//{*}NewGatewayIPAddress", default="").strip()
+            enabled = entry.findtext(".//{*}NewEnable",           default="1").strip()
             if dest and mask and dest != "0.0.0.0":
+                collected.append((dest, mask, gw, enabled))
+
+        routes: set[tuple[str, str, str]] = set()
+        for dest, mask, gw, enabled in collected:
+            if enabled != "0":
                 routes.add((dest, mask, gw))
+            else:
+                # Fritz!Box created this entry disabled — remove it so sync_router
+                # re-adds it with NewEnable=1.  The resulting zero entry will be
+                # cleaned up by purge_zero_routes() in the same sync cycle.
+                log.warning("Disabled route %s/%s via %s — removing for re-add", dest, mask, gw)
+                try:
+                    self.delete_route(dest, mask)
+                except Exception as exc:
+                    log.warning("Failed to remove disabled route %s/%s: %s", dest, mask, exc)
+
         return routes
 
     def purge_zero_routes(self) -> int:
