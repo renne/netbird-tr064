@@ -50,17 +50,19 @@ def sync_router(
     For each Fritz!Box, the configured ``peers`` map lists the routing peers
     physically on *this* router's LAN (local peers).  The daemon:
 
-    1. Computes ``local_cidrs`` — all subnets advertised by local peers.
-    2. Computes ``remote_cidrs`` — all subnets in route_map minus local_cidrs
+    1. Computes ``local_cidrs`` -- all subnets advertised by local peers.
+    2. Computes ``remote_cidrs`` -- all subnets in route_map minus local_cidrs
        (i.e. subnets that live at *other* sites and must be reached via the
        NetBird overlay).
     3. If ``overlay_cidr`` is set and ``inject_overlay_cidr`` is true (default),
        adds it to remote_cidrs so LAN devices can reach overlay IPs directly.
-    4. Removes any CIDR in ``exclude_subnets`` (e.g. subnets the router already
-       knows via its own WireGuard VPN tunnel) from remote_cidrs.
+    4. Removes any CIDR in ``exclude_subnets`` from remote_cidrs (addition
+       protection) and preserves any existing router route that falls within
+       an excluded subnet (deletion protection).
     5. Picks the first configured+online local peer as the gateway (LAN IP).
     6. Injects all remote_cidrs via that gateway.  If no local peer is online,
-       removes all owned routes to avoid silent blackholes.
+       removes all owned routes (subject to exclude_subnets protection) to
+       avoid silent blackholes.
 
     Failover: if the primary local peer goes offline, the next configured peer
     (by config order) becomes the gateway and all remote routes are updated.
@@ -70,13 +72,16 @@ def sync_router(
     inject_overlay_cidr : bool, default true
         Set to false to suppress injection of the NetBird overlay CIDR
         (e.g. 100.91.0.0/16).  Useful for routers that reject CGNAT routes
-        (Fritz!Box 7530 AX returns HTTP 500 for 100.x.x.x destinations).
+        via TR-064 (Fritz!Box 7530 AX returns HTTP 500 for 100.x.x.x
+        destinations).  The overlay CIDR can still be added manually via the
+        web UI; add it to ``exclude_subnets`` to prevent the daemon from
+        removing it.
     exclude_subnets : list[str], default []
-        CIDRs to exclude from both injection *and* deletion.  Use this for
+        CIDRs to exclude from injection *and* from deletion.  Use this for
         subnets the router already knows via its own WireGuard VPN (e.g. the
-        remote-site LAN) to avoid conflicts with auto-installed VPN routes,
-        or for manually-managed routes the daemon must never touch (e.g. a
-        CGNAT supernet added via the Fritz!Box web UI when TR-064 rejects it).
+        remote-site LAN) to avoid conflicts, and for manually-added routes
+        that the daemon must not remove (e.g. a CGNAT supernet added via the
+        Fritz!Box web UI when ``inject_overlay_cidr`` is false).
     """
     name = router_cfg.get("name", router_cfg["url"])
     backend_key = router_cfg.get("backend", "tr064").lower()
@@ -94,7 +99,7 @@ def sync_router(
 
     router_peers: dict[str, str] = router_cfg.get("peers", {})
     if not router_peers:
-        log.error("Router %s: no 'peers' map in config — skipping", name)
+        log.error("Router %s: no 'peers' map in config -- skipping", name)
         return
 
     # Determine gateway: first configured+online local peer wins
@@ -112,7 +117,7 @@ def sync_router(
     for peer_id in router_peers:
         local_cidrs.update(route_map.get(peer_id, set()))
 
-    # Remote CIDRs are everything else — routes to other sites
+    # Remote CIDRs are everything else -- routes to other sites
     all_cidrs: set[str] = set()
     for cidrs in route_map.values():
         all_cidrs.update(cidrs)
@@ -125,17 +130,19 @@ def sync_router(
             net = ipaddress.IPv4Network(overlay_cidr, strict=False)
             remote_cidrs.add(str(net))
         except ValueError:
-            log.warning("[%s] Invalid overlay_cidr '%s' — ignoring", name, overlay_cidr)
+            log.warning("[%s] Invalid overlay_cidr '%s' -- ignoring", name, overlay_cidr)
 
-    # Remove subnets the router already knows (e.g. via its own WireGuard VPN)
+    # Build the exclude list once -- used for both addition and deletion protection
     exclude_subnets = router_cfg.get("exclude_subnets", [])
     exclude_nets: list[ipaddress.IPv4Network] = []
-    if exclude_subnets:
-        for s in exclude_subnets:
-            try:
-                exclude_nets.append(ipaddress.IPv4Network(s, strict=False))
-            except ValueError:
-                log.warning("[%s] Invalid exclude_subnet '%s' — ignoring", name, s)
+    for s in exclude_subnets:
+        try:
+            exclude_nets.append(ipaddress.IPv4Network(s, strict=False))
+        except ValueError:
+            log.warning("[%s] Invalid exclude_subnet '%s' -- ignoring", name, s)
+
+    # Remove subnets the router already knows (e.g. via its own WireGuard VPN)
+    if exclude_nets:
         filtered: set[str] = set()
         for cidr in remote_cidrs:
             try:
@@ -148,7 +155,7 @@ def sync_router(
             filtered.add(cidr)
         remote_cidrs = filtered
 
-    # Build desired state: (dest, mask) → gateway_ip
+    # Build desired state: (dest, mask) -> gateway_ip
     active_routes: dict[tuple[str, str], str] = {}
     if active_gw:
         for cidr in remote_cidrs:
@@ -195,7 +202,7 @@ def sync_router(
             pass  # already correct
         elif current_gw not in owned_ips:
             log.warning(
-                "[%s] Skipping %s/%s — destination already covered by a "
+                "[%s] Skipping %s/%s -- destination already covered by a "
                 "foreign route (gateway %s, not managed by this service)",
                 name, dest, mask, current_gw,
             )
@@ -208,7 +215,8 @@ def sync_router(
             except Exception as exc:
                 log.error("[%s] Failed to update %s/%s: %s", name, dest, mask, exc)
 
-    # Remove owned routes that are no longer desired
+    # Remove owned routes that are no longer desired -- but preserve any route
+    # whose destination falls within an excluded subnet (manually-managed routes)
     for dest, mask, gw in all_routes:
         if gw in owned_ips and (dest, mask) not in active_routes:
             if exclude_nets:
@@ -257,7 +265,7 @@ def main() -> None:
     poll_interval = int(sync_cfg.get("poll_interval", 60))
     only_enabled = bool(sync_cfg.get("only_enabled", True))
 
-    log.info("Starting sync loop — %d router(s), poll every %ds",
+    log.info("Starting sync loop -- %d router(s), poll every %ds",
              len(routers_cfg), poll_interval)
 
     while True:
