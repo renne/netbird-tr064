@@ -54,14 +54,27 @@ def sync_router(
     2. Computes ``remote_cidrs`` — all subnets in route_map minus local_cidrs
        (i.e. subnets that live at *other* sites and must be reached via the
        NetBird overlay).
-    3. If ``overlay_cidr`` is set, adds it to remote_cidrs so LAN devices can
-       reach overlay IPs (e.g. 100.64.0.0/10) directly.
-    4. Picks the first configured+online local peer as the gateway (LAN IP).
-    5. Injects all remote_cidrs via that gateway.  If no local peer is online,
+    3. If ``overlay_cidr`` is set and ``inject_overlay_cidr`` is true (default),
+       adds it to remote_cidrs so LAN devices can reach overlay IPs directly.
+    4. Removes any CIDR in ``exclude_subnets`` (e.g. subnets the router already
+       knows via its own WireGuard VPN tunnel) from remote_cidrs.
+    5. Picks the first configured+online local peer as the gateway (LAN IP).
+    6. Injects all remote_cidrs via that gateway.  If no local peer is online,
        removes all owned routes to avoid silent blackholes.
 
     Failover: if the primary local peer goes offline, the next configured peer
     (by config order) becomes the gateway and all remote routes are updated.
+
+    Per-router config options
+    -------------------------
+    inject_overlay_cidr : bool, default true
+        Set to false to suppress injection of the NetBird overlay CIDR
+        (e.g. 100.91.0.0/16).  Useful for routers that reject CGNAT routes
+        (Fritz!Box 7530 AX returns HTTP 500 for 100.x.x.x destinations).
+    exclude_subnets : list[str], default []
+        CIDRs to exclude from injection.  Use this for subnets the router
+        already knows via its own WireGuard VPN (e.g. the remote-site LAN)
+        to avoid conflicts with auto-installed VPN routes.
     """
     name = router_cfg.get("name", router_cfg["url"])
     backend_key = router_cfg.get("backend", "tr064").lower()
@@ -104,12 +117,34 @@ def sync_router(
     remote_cidrs = all_cidrs - local_cidrs
 
     # Include the NetBird overlay network so LAN devices can reach overlay IPs
-    if overlay_cidr:
+    inject_overlay = bool(router_cfg.get("inject_overlay_cidr", True))
+    if inject_overlay and overlay_cidr:
         try:
             net = ipaddress.IPv4Network(overlay_cidr, strict=False)
             remote_cidrs.add(str(net))
         except ValueError:
             log.warning("[%s] Invalid overlay_cidr '%s' — ignoring", name, overlay_cidr)
+
+    # Remove subnets the router already knows (e.g. via its own WireGuard VPN)
+    exclude_subnets = router_cfg.get("exclude_subnets", [])
+    if exclude_subnets:
+        exclude_nets: list[ipaddress.IPv4Network] = []
+        for s in exclude_subnets:
+            try:
+                exclude_nets.append(ipaddress.IPv4Network(s, strict=False))
+            except ValueError:
+                log.warning("[%s] Invalid exclude_subnet '%s' — ignoring", name, s)
+        filtered: set[str] = set()
+        for cidr in remote_cidrs:
+            try:
+                net = ipaddress.IPv4Network(cidr, strict=False)
+                if any(net.subnet_of(excl) for excl in exclude_nets):
+                    log.debug("[%s] Excluding %s (covered by exclude_subnets)", name, cidr)
+                    continue
+            except ValueError:
+                pass
+            filtered.add(cidr)
+        remote_cidrs = filtered
 
     # Build desired state: (dest, mask) → gateway_ip
     active_routes: dict[tuple[str, str], str] = {}
