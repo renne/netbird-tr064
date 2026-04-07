@@ -88,6 +88,15 @@ def sync_router(
         log.error("Router %s: failed to initialise backend: %s", name, exc)
         return
 
+    # TODO: The 'peers' map shall be removed once the NetBird management API
+    # exposes per-peer LAN IP addresses.  Currently no API path returns a
+    # routing peer's LAN IP:
+    #   GET /api/peers  → ip = overlay mesh IP (100.x.x.x),
+    #                      connection_ip = WAN/public IP only
+    #   GET /api/routes → routed CIDRs + peer IDs, no next-hop LAN IP
+    # Until then, the 'peers' map in config.yaml (peer_id → LAN IP) is
+    # required and must be maintained manually.
+    # Tracked upstream: https://github.com/netbirdio/netbird/issues/5810
     router_peers: dict[str, str] = router_cfg.get("peers", {})
     if not router_peers:
         log.error("Router %s: no 'peers' map in config -- skipping", name)

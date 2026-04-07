@@ -126,9 +126,12 @@ selects the first *online* peer for each route CIDR. If the primary goes offline
 the route is automatically re-pointed to the next peer within one `poll_interval`.
 If all peers are offline, the route is removed.
 
-> **TODO:** Auto-derive the LAN IP from the NetBird management server once the API
-> exposes per-peer LAN interface information, removing the need to configure the
-> `peers` map manually.
+> **TODO:** The `peers` map shall be removed once the NetBird management API
+> exposes per-peer LAN IP addresses.  The `peers` map must be maintained manually
+> for now — research confirmed that no current API path returns a routing peer's
+> LAN IP (`GET /api/peers` returns the overlay mesh IP and WAN/public IP only;
+> `GET /api/routes` returns routed CIDRs and peer IDs but no next-hop LAN address).
+> Tracked upstream: [netbirdio/netbird#5810](https://github.com/netbirdio/netbird/issues/5810)
 
 ### VPN route limitation — `exclude_subnets` is always manual
 
@@ -233,6 +236,8 @@ consumer and SMB routers. The TR-064 backend in this project uses only:
 
 ## Related
 
+- [netbirdio/netbird#5810](https://github.com/netbirdio/netbird/issues/5810) —
+  Feature request: expose per-peer LAN IP (`Meta.NetworkAddresses`) in `GET /api/peers` (blocks `peers` map removal)
 - [netbirdio/netbird#5801](https://github.com/netbirdio/netbird/issues/5801) —
   Feature request: management server TR-064 route injection
 - [netbirdio/netbird#669](https://github.com/netbirdio/netbird/issues/669) —
