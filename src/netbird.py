@@ -94,6 +94,48 @@ class NetBirdClient:
 
         return result
 
+    def get_router_metrics(self, only_enabled: bool = True) -> dict[str, int]:
+        """Return the lowest NetBird routing metric for each peer.
+
+        Iterates /api/networks → /api/networks/{id}/routers.  If a peer
+        appears as a router in multiple networks, the minimum metric is
+        returned.  Masquerade=true and disabled routers are excluded (same
+        filters as :meth:`get_routes`).
+
+        Returns:
+            Mapping of peer_id -> metric (1–9999).  Peers absent from any
+            network router list are not included; callers should default to
+            9999 for missing entries.
+        """
+        networks_url = f"{self._api_base}/networks"
+        resp = self._session.get(networks_url, timeout=15)
+        resp.raise_for_status()
+        networks = resp.json()
+
+        result: dict[str, int] = {}
+
+        for network in networks:
+            net_id = network.get("id", "")
+
+            rtr_resp = self._session.get(
+                f"{self._api_base}/networks/{net_id}/routers", timeout=15
+            )
+            rtr_resp.raise_for_status()
+
+            for router in rtr_resp.json():
+                if only_enabled and not router.get("enabled", True):
+                    continue
+                if router.get("masquerade", False):
+                    continue
+                peer_id = router.get("peer", "").strip()
+                if not peer_id:
+                    continue
+                metric = int(router.get("metric", 9999))
+                if peer_id not in result or metric < result[peer_id]:
+                    result[peer_id] = metric
+
+        return result
+
     def get_peer_statuses(self) -> dict[str, bool]:
         """Return connection status for all peers.
 

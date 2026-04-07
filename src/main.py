@@ -42,6 +42,7 @@ def sync_router(
     route_map: dict[str, set[str]],
     peer_status: dict[str, bool],
     overlay_cidr: Optional[str] = None,
+    peer_metrics: Optional[dict[str, int]] = None,
 ) -> None:
     """Reconcile one router against the current NetBird route set.
 
@@ -59,13 +60,16 @@ def sync_router(
     4. Removes any CIDR in ``exclude_subnets`` from remote_cidrs (addition
        protection) and preserves any existing router route that falls within
        an excluded subnet (deletion protection).
-    5. Picks the first configured+online local peer as the gateway (LAN IP).
+    5. Picks the online local peer with the **lowest NetBird routing metric**
+       as the gateway (LAN IP).  Ties are broken by config order.  This
+       mirrors the peer selection behaviour of the NetBird client itself.
     6. Injects all remote_cidrs via that gateway.  If no local peer is online,
        removes all owned routes (subject to exclude_subnets protection) to
        avoid silent blackholes.
 
-    Failover: if the primary local peer goes offline, the next configured peer
-    (by config order) becomes the gateway and all remote routes are updated.
+    Failover: if the active local peer goes offline, the peer with the next
+    lowest metric (then config order for ties) becomes the gateway and all
+    remote routes are updated within one poll_interval.
 
     Per-router config options
     -------------------------
@@ -102,15 +106,30 @@ def sync_router(
         log.error("Router %s: no 'peers' map in config -- skipping", name)
         return
 
-    # Determine gateway: first configured+online local peer wins
+    # Determine gateway: lowest-metric online peer wins; ties broken by config order.
+    # Mirrors NetBird client peer selection (GET /api/networks/{id}/routers metric field).
     active_gw: Optional[str] = None
-    for peer_id, lan_ip in router_peers.items():
+    metrics = peer_metrics or {}
+    sorted_peers = [
+        (peer_id, lan_ip)
+        for _, (peer_id, lan_ip) in sorted(
+            enumerate(router_peers.items()),
+            key=lambda t: (metrics.get(t[1][0], 9999), t[0]),
+        )
+    ]
+    for peer_id, lan_ip in sorted_peers:
         if peer_status.get(peer_id, False):
             active_gw = lan_ip
-            log.debug("Router %s: active gateway is %s (peer %s)", name, lan_ip, peer_id)
+            log.debug(
+                "Router %s: active gateway is %s (peer %s, metric %d)",
+                name, lan_ip, peer_id, metrics.get(peer_id, 9999),
+            )
             break
         else:
-            log.debug("Router %s: peer %s is offline", name, peer_id)
+            log.debug(
+                "Router %s: peer %s is offline (metric %d)",
+                name, peer_id, metrics.get(peer_id, 9999),
+            )
 
     # Compute local CIDRs (subnets this router's own LAN peers advertise)
     local_cidrs: set[str] = set()
@@ -271,9 +290,11 @@ def main() -> None:
         try:
             route_map = nb_client.get_routes(only_enabled=only_enabled)
             peer_status = nb_client.get_peer_statuses()
+            peer_metrics = nb_client.get_router_metrics(only_enabled=only_enabled)
             overlay_cidr = nb_client.get_overlay_network()
             log.debug("NetBird route_map: %s", route_map)
             log.debug("NetBird peer_status: %s", peer_status)
+            log.debug("NetBird peer_metrics: %s", peer_metrics)
             log.debug("NetBird overlay_cidr: %s", overlay_cidr)
         except Exception as exc:
             log.error("Failed to fetch NetBird data: %s", exc)
@@ -281,7 +302,10 @@ def main() -> None:
             continue
 
         for router_cfg in routers_cfg:
-            sync_router(router_cfg, route_map, peer_status, overlay_cidr=overlay_cidr)
+            sync_router(
+                router_cfg, route_map, peer_status,
+                overlay_cidr=overlay_cidr, peer_metrics=peer_metrics,
+            )
 
         time.sleep(poll_interval)
 

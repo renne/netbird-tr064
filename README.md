@@ -23,10 +23,11 @@ This service was created as a workaround pending native Fritz!OS support
    WireGuard VPN or manually) are never deleted.
    If a desired destination is already covered by a foreign route, a `WARNING`
    is logged and the route is skipped.
-6. **Dynamic failover**: for each CIDR, the daemon picks the first online peer
-   (in config order) as the active gateway. If that peer goes offline, the route
-   is re-pointed to the next available peer within one `poll_interval`. If all
-   peers are offline, the route is removed to avoid a silent blackhole.
+6. **Metric-aware failover**: for each CIDR, the daemon picks the *online* peer
+   with the lowest NetBird `metric` as the active gateway (mirroring NetBird client
+   peer-selection). Config order breaks ties. If that peer goes offline, the route
+   is re-pointed to the next best peer within one `poll_interval`. If all peers
+   are offline, the route is removed to avoid a silent blackhole.
 
 Because NetBird has no management-plane webhooks
 ([#1596](https://github.com/netbirdio/netbird/issues/1596),
@@ -105,7 +106,7 @@ routers:
 | `routers[].url` | Yes | — | TR-064 base URL (e.g. `http://192.168.178.1:49000`) |
 | `routers[].username` | Yes | — | Router admin username |
 | `routers[].password` | Yes | — | Router admin password |
-| `routers[].peers` | Yes | — | Map of `peer_id → LAN IP` for routing peers; defines next-hop addresses. Peers tried in order — first online wins. |
+| `routers[].peers` | Yes | — | Map of `peer_id → LAN IP` for routing peers; defines next-hop addresses. The online peer with the lowest NetBird metric is selected; config order breaks ties. |
 | `routers[].exclude_subnets` | No | `[]` | CIDRs to **skip and protect**: never injected even if present in NetBird, *and* existing routes matching them are never deleted. Use for subnets covered by a Fritz!Box VPN tunnel. See [VPN route limitation](#vpn-route-limitation--exclude_subnets-is-always-manual). |
 
 ### Routing peers
@@ -121,10 +122,12 @@ under **Peers**.
 it as the static route next-hop. Use either a static IP configured on the peer
 itself, or a DHCP reservation (fixed lease by MAC address) on the Fritz!Box.
 
-**High availability:** list multiple peers in priority order. The daemon always
-selects the first *online* peer for each route CIDR. If the primary goes offline,
-the route is automatically re-pointed to the next peer within one `poll_interval`.
-If all peers are offline, the route is removed.
+**High availability:** list multiple peers. The daemon selects the online peer with
+the **lowest NetBird routing metric** as the active gateway — matching the same
+peer-selection logic used by NetBird clients (`GET /api/networks/{id}/routers`
+`metric` field, lower = preferred). Config order breaks ties. If the active peer
+goes offline, the next-best peer takes over within one `poll_interval`. If all
+peers are offline, the route is removed.
 
 > **TODO:** The `peers` map shall be removed once the NetBird management API
 > exposes per-peer LAN IP addresses.  The `peers` map must be maintained manually
